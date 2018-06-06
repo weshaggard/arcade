@@ -11,5 +11,7 @@ namespace Microsoft.DotNet.Darc
         public string Ref { get; set; }
 
         public string Sha { get; set; }
+
+        public bool Force { get; set; }
     }
 }

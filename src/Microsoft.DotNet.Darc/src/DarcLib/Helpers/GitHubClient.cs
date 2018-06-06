@@ -55,18 +55,20 @@ namespace Microsoft.DotNet.Darc
 
                 HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}branches/{DarcBranchName}-{branch}");
 
+                string latestSha = await GetLastCommitShaAsync(ownerAndRepo, branch);
+                GitHubRef githubRef = new GitHubRef($"refs/heads/{DarcBranchName}-{branch}", latestSha);
+
+                JsonSerializerSettings serializerSettings = new JsonSerializerSettings
+                {
+                    ContractResolver = new CamelCasePropertyNamesContractResolver()
+                };
+
                 if (!response.IsSuccessStatusCode)
                 {
                     if (response.StatusCode == HttpStatusCode.NotFound)
                     {
                         Console.WriteLine($"'{DarcBranchName}' branch doesn't exist. Creating it...");
-                        string latestSha = await GetLastCommitShaAsync(ownerAndRepo, branch);
-                        GitHubRef githubRef = new GitHubRef($"refs/heads/{DarcBranchName}-{branch}", latestSha);
 
-                        JsonSerializerSettings serializerSettings = new JsonSerializerSettings
-                        {
-                            ContractResolver = new CamelCasePropertyNamesContractResolver()
-                        };
                         string body = JsonConvert.SerializeObject(githubRef, serializerSettings);
 
                         response = await client.PostAsync($"repos/{ownerAndRepo}git/refs", new StringContent(body));
@@ -86,6 +88,29 @@ namespace Microsoft.DotNet.Darc
                         response.EnsureSuccessStatusCode();
                     }
                 }
+                else
+                {
+                    Console.WriteLine($"Branch '{DarcBranchName}-{branch}' exists, making sure it is in sync with '{branch}'...");
+
+                    githubRef.Force = true;
+                    string body = JsonConvert.SerializeObject(githubRef, serializerSettings);
+
+                    HttpMethod method = new HttpMethod("PATCH");
+                    HttpRequestMessage message = new HttpRequestMessage(method, $"repos/{ownerAndRepo}git/{githubRef.Ref}")
+                    {
+                        Content = new StringContent(body)
+                    };
+
+                    response = await client.SendAsync(message);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Trying to pull the lastest changes from '{branch}' into '{DarcBranchName}-{branch}' failed with status code '{response.StatusCode}'"); ;
+                        response.EnsureSuccessStatusCode();
+                    }
+                }
+
+                Console.WriteLine($"Branch '{DarcBranchName}-{branch}' now in sync with'{branch}'.");
 
                 return true;
             }
