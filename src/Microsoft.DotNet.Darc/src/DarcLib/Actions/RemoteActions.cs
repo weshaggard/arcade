@@ -128,7 +128,7 @@ ORDER BY DateProduced DESC";
                         // If there is an arcade asset that we need to update we try to update the script files as well
                         DependencyItem arcadeItem = itemsToUpdate.Where(i => i.Name.Contains("arcade")).FirstOrDefault();
                         if (arcadeItem != null &&
-                            await githubClient.PushFilesAsync(await GetScriptCommitsAsync(branch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch))
+                            await githubClient.PushFilesAsync(await GetScriptCommitsAsync(pullRequestBaseBranch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch))
                         {
                             linkToPr = await githubClient.CreatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestTitle, pullRequestDescription);
                             Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
@@ -158,8 +158,15 @@ ORDER BY DateProduced DESC";
 
             if (await githubClient.PushFilesAsync(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch))
             {
-                linkToPr = await githubClient.UpdatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestId, pullRequestTitle, pullRequestDescription);
-                Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
+
+                // If there is an arcade asset that we need to update we try to update the script files as well
+                DependencyItem arcadeItem = itemsToUpdate.Where(i => i.Name.Contains("arcade")).FirstOrDefault();
+                if (arcadeItem != null &&
+                    await githubClient.PushFilesAsync(await GetScriptCommitsAsync(branch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch))
+                {
+                    linkToPr = await githubClient.UpdatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestId, pullRequestTitle, pullRequestDescription);
+                    Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
+                }
             }
 
             return linkToPr;
@@ -167,8 +174,10 @@ ORDER BY DateProduced DESC";
 
         private async Task<Dictionary<string, GitHubCommit>> GetScriptCommitsAsync(string branch, string assetName = "arcade.sdk")
         {
+            Console.WriteLine($"Generating commits for script files");
             DependencyItem latestAsset = await GetLatestDependencyAsync(assetName);
             Dictionary<string, GitHubCommit> commits = await githubClient.GetCommitsForPathAsync(latestAsset.RepoUri, latestAsset.Sha, branch);
+            Console.WriteLine($"Generating commits for script files succeeded!");
             return commits;
         }
 

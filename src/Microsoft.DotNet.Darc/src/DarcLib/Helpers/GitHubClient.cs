@@ -294,11 +294,14 @@ namespace Microsoft.DotNet.Darc
 
                 foreach (GitHubContent content in contents)
                 {
-                    if (content.Type == GitHubContentType.File && !DependencyFileManager.GetDependencyFiles.Contains(content.Path))
+                    if (content.Type == GitHubContentType.File)
                     {
-                        string fileContent = await GetFileContentAsync(ownerAndRepo, content.Path);
-                        GitHubCommit commit = new GitHubCommit($"Updating contents of file '{content.Path}'", fileContent, branch);
-                        commits.Add(content.Path, commit);
+                        if (!DependencyFileManager.GetDependencyFiles.Contains(content.Path))
+                        {
+                            string fileContent = await GetFileContentAsync(ownerAndRepo, content.Path);
+                            GitHubCommit commit = new GitHubCommit($"Updating contents of file '{content.Path}'", fileContent, branch);
+                            commits.Add(content.Path, commit);
+                        }
                     }
                     else
                     {
@@ -380,7 +383,9 @@ namespace Microsoft.DotNet.Darc
 
         private string GetOwnerAndRepo(string repoUri)
         {
-            return repoUri.Replace("https://github.com/", string.Empty);
+            repoUri = repoUri.Replace("https://github.com/", string.Empty);
+            repoUri = repoUri.Last() != '/' ? $"{repoUri}/" : repoUri;
+            return repoUri;
         }
 
         private string GetDecodedContent(string encodedContent)
