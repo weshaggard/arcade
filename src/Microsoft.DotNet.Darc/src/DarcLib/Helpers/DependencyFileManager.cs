@@ -16,6 +16,19 @@ namespace Microsoft.DotNet.Darc
         private const string VersionPropsExpression = "VersionProps";
         private const string SdkVersionProperty = "version";
 
+        public static HashSet<string> GetDependencyFiles
+        {
+            get
+            {
+                return new HashSet<string>()
+                {
+                    VersionDetailsXmlPath,
+                    VersionPropsPath,
+                    GlobalJsonPath
+                };
+            }
+        }
+
         public DependencyFileManager(string accessToken)
         {
             gitHubClient = new GitHubClient(accessToken);
@@ -60,7 +73,7 @@ namespace Microsoft.DotNet.Darc
                     {
                         foreach (XmlNode childNode in node.ChildNodes)
                         {
-                            if (childNode.NodeType != XmlNodeType.Comment)
+                            if (childNode.NodeType != XmlNodeType.Comment && childNode.NodeType != XmlNodeType.Whitespace)
                             {
                                 DependencyItem dependencyItem = new DependencyItem
                                 {
@@ -168,6 +181,7 @@ namespace Microsoft.DotNet.Darc
 
             try
             {
+                document.PreserveWhitespace = true;
                 document.LoadXml(fileContent);
             }
             catch (Exception exc)

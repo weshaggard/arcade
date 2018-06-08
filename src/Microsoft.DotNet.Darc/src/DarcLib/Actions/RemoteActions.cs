@@ -123,11 +123,17 @@ ORDER BY DateProduced DESC";
                 {
                     DependencyFileContentContainer fileContainer = await fileManager.UpdateDependencyFiles(itemsToUpdate, repoUri, branch);
 
-                    if (await githubClient.PushDependencyFiles(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch))
+                    if (await githubClient.PushFilesAsync(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch))
                     {
-                        linkToPr = await githubClient.CreatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestTitle, pullRequestDescription);
-                        Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
-                        return linkToPr;
+                        // If there is an arcade asset that we need to update we try to update the script files as well
+                        DependencyItem arcadeItem = itemsToUpdate.Where(i => i.Name.Contains("arcade")).FirstOrDefault();
+                        if (arcadeItem != null &&
+                            await githubClient.PushFilesAsync(await GetScriptCommitsAsync(branch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch))
+                        {
+                            linkToPr = await githubClient.CreatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestTitle, pullRequestDescription);
+                            Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
+                            return linkToPr;
+                        }
                     }
                 }
                 else
@@ -136,7 +142,7 @@ ORDER BY DateProduced DESC";
                     return linkToPr;
                 }
             }
-            
+
             Console.WriteLine($"Failed to find or create a branch where Darc would commited the changes for the PR.");
             return linkToPr;
         }
@@ -150,13 +156,20 @@ ORDER BY DateProduced DESC";
 
             DependencyFileContentContainer fileContainer = await fileManager.UpdateDependencyFiles(itemsToUpdate, repoUri, branch);
 
-            if (await githubClient.PushDependencyFiles(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch))
+            if (await githubClient.PushFilesAsync(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch))
             {
                 linkToPr = await githubClient.UpdatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestId, pullRequestTitle, pullRequestDescription);
                 Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
             }
 
             return linkToPr;
+        }
+
+        private async Task<Dictionary<string, GitHubCommit>> GetScriptCommitsAsync(string branch, string assetName = "arcade.sdk")
+        {
+            DependencyItem latestAsset = await GetLatestDependencyAsync(assetName);
+            Dictionary<string, GitHubCommit> commits = await githubClient.GetCommitsForPathAsync(latestAsset.RepoUri, latestAsset.Sha, branch);
+            return commits;
         }
 
         private async Task<IEnumerable<DependencyItem>> GetAssetsAsync(string assetName, RelationType relationType, string logMessage, string version = null, string repoUri = null, string branch = null, string sha = null, DependencyType type = DependencyType.Unknown)

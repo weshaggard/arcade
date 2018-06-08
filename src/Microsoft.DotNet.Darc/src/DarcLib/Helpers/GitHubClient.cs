@@ -116,7 +116,7 @@ namespace Microsoft.DotNet.Darc
             }
         }
 
-        public async Task<bool> PushDependencyFiles(Dictionary<string, GitHubCommit> filesToCommit, string repoUri, string pullRequestBaseBranch)
+        public async Task<bool> PushFilesAsync(Dictionary<string, GitHubCommit> filesToCommit, string repoUri, string pullRequestBaseBranch)
         {
             using (HttpClient client = CreateHttpClient())
             {
@@ -195,7 +195,7 @@ namespace Microsoft.DotNet.Darc
                 {
                     title = VersionPullRequestTitle;
                 }
-                
+
                 description = description ?? VersionPullRequestDescription;
 
                 GitHubPullRequest pullRequest = new GitHubPullRequest(title, description, sourceBranch, mergeWithBranch);
@@ -251,7 +251,7 @@ namespace Microsoft.DotNet.Darc
                     Content = new StringContent(body)
                 };
 
-                
+
                 HttpResponseMessage response = await client.SendAsync(message);
 
                 if (!response.IsSuccessStatusCode)
@@ -265,6 +265,79 @@ namespace Microsoft.DotNet.Darc
             }
 
             return linkToPullRquest;
+        }
+
+        public async Task<Dictionary<string, GitHubCommit>> GetCommitsForPathAsync(string repoUri, string sha, string branch, string path = "eng")
+        {
+            Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}'");
+            Dictionary<string, GitHubCommit> commits = new Dictionary<string, GitHubCommit>();
+            await GetCommitMapForPathAsync(repoUri, sha, branch, commits, path);
+            return commits;
+        }
+
+        private async Task GetCommitMapForPathAsync(string repoUri, string sha, string branch, Dictionary<string, GitHubCommit> commits, string path = "eng")
+        {
+            Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}'");
+
+            using (HttpClient client = CreateHttpClient())
+            {
+                string ownerAndRepo = GetOwnerAndRepo(repoUri);
+                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}contents/{path}?ref={sha}");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}' failed with code '{response.StatusCode}'");
+                    response.EnsureSuccessStatusCode();
+                }
+
+                List<GitHubContent> contents = JsonConvert.DeserializeObject<List<GitHubContent>>(await response.Content.ReadAsStringAsync());
+
+                foreach (GitHubContent content in contents)
+                {
+                    if (content.Type == GitHubContentType.File && !DependencyFileManager.GetDependencyFiles.Contains(content.Path))
+                    {
+                        string fileContent = await GetFileContentAsync(ownerAndRepo, content.Path);
+                        GitHubCommit commit = new GitHubCommit($"Updating contents of file '{content.Path}'", fileContent, branch);
+                        commits.Add(content.Path, commit);
+                    }
+                    else
+                    {
+                        await GetCommitMapForPathAsync(repoUri, sha, branch, commits, content.Path);
+                    }
+                }
+            }
+
+            Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}' succeeded!");
+        }
+
+        //public Task UpdateScriptFilesAsync(string repoUri, string sha)
+        //{
+        //    using (HttpClient client = CreateHttpClient())
+        //    {
+        //        string ownerAndRepo = GetOwnerAndRepo(repoUri);
+
+        //    }
+        //}
+
+        private async Task<string> GetFileContentAsync(string ownerAndRepo, string path)
+        {
+            string encodedContent;
+
+            using (HttpClient client = CreateHttpClient())
+            {
+                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}contents/{path}");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Getting the contents of file '{path}' of failed with code '{response.StatusCode}'");
+                    response.EnsureSuccessStatusCode();
+                }
+
+                dynamic file = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+                encodedContent = file.content;
+            }
+
+            return encodedContent;
         }
 
         private HttpClient CreateHttpClient()
