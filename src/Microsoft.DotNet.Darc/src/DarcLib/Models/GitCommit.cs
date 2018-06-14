@@ -1,8 +1,12 @@
 namespace Microsoft.DotNet.Darc
 {
-    public class GitHubCommit
+    public class GitCommit
     {
-        public GitHubCommit(string message, string content, string branch)
+        public GitCommit(string content) : this(null, content, null)
+        {
+        }
+
+        public GitCommit(string message, string content, string branch)
         {
             Message = message;
             Content = content;

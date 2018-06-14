@@ -14,18 +14,29 @@ namespace Microsoft.DotNet.Darc
 {
     public class RemoteActions : IRemote
     {
-        private readonly DarcSettings darcSetings;
-
         private readonly DependencyFileManager fileManager;
 
-        private readonly GitHubClient githubClient;
-
+        private readonly IGitRepo gitClient;
 
         public RemoteActions(DarcSettings settings)
         {
-            darcSetings = settings;
-            fileManager = new DependencyFileManager(darcSetings.PersonalAccessToken);
-            githubClient = new GitHubClient(darcSetings.PersonalAccessToken);
+            ValidateSettings(settings);
+
+            if (settings.GitType == GitRepoType.GitHub)
+            {
+                gitClient = new GitHubClient(settings.PersonalAccessToken);
+            }
+            else
+            {
+                gitClient = new VstsClient(settings.PersonalAccessToken);
+            }
+
+            fileManager = new DependencyFileManager(gitClient);
+        }
+
+        public async void Test()
+        {
+            await gitClient.CreateDarcBranchAsync("https://devdiv.visualstudio.com/DefaultCollection/DevDiv/_git/chcosta-explore", "master");
         }
 
         public async Task<IEnumerable<DependencyItem>> GetDependantAssetsAsync(string assetName, string version = null, string repoUri = null, string branch = null, string sha = null, DependencyType type = DependencyType.Unknown)
@@ -111,39 +122,29 @@ ORDER BY DateProduced DESC";
         {
             Console.WriteLine($"Create pull request to update dependencies in repo '{repoUri}' and branch '{branch}'...");
             string linkToPr = null;
+            await gitClient.CreateDarcBranchAsync(repoUri, branch);
+            pullRequestBaseBranch = pullRequestBaseBranch ?? $"darc-{branch}";
 
-            if (await githubClient.CreateDarcBranchAsync(repoUri, branch))
+            // Check for exsting PRs in the darc created branch. If there is one under the same user we fail fast before commiting files that won't be included in a PR. 
+            string existingPr = await gitClient.CheckForOpenedPullRequestsAsync(repoUri, pullRequestBaseBranch);
+
+            if (string.IsNullOrEmpty(existingPr))
             {
-                pullRequestBaseBranch = pullRequestBaseBranch ?? $"darc-{branch}";
+                DependencyFileContentContainer fileContainer = await fileManager.UpdateDependencyFiles(itemsToUpdate, repoUri, branch);
+                await gitClient.PushFilesAsync(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch);
 
-                // Check for exsting PRs in the darc created branch. If there is one under the same user we fail fast before commiting files that won't be included in a PR. 
-                string existingPr = await githubClient.CheckForOpenedPullRequestsAsync(repoUri, pullRequestBaseBranch);
-
-                if (string.IsNullOrEmpty(existingPr))
+                // If there is an arcade asset that we need to update we try to update the script files as well
+                DependencyItem arcadeItem = itemsToUpdate.Where(i => i.Name.Contains("arcade")).FirstOrDefault();
+                if (arcadeItem != null)
                 {
-                    DependencyFileContentContainer fileContainer = await fileManager.UpdateDependencyFiles(itemsToUpdate, repoUri, branch);
-
-                    if (await githubClient.PushFilesAsync(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch))
-                    {
-                        // If there is an arcade asset that we need to update we try to update the script files as well
-                        DependencyItem arcadeItem = itemsToUpdate.Where(i => i.Name.Contains("arcade")).FirstOrDefault();
-                        if (arcadeItem != null &&
-                            await githubClient.PushFilesAsync(await GetScriptCommitsAsync(pullRequestBaseBranch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch))
-                        {
-                            linkToPr = await githubClient.CreatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestTitle, pullRequestDescription);
-                            Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
-                            return linkToPr;
-                        }
-                    }
-                }
-                else
-                {
-                    Console.WriteLine($"PR with link '{existingPr}' is already opened in repo '{repoUri}' and branch '{pullRequestBaseBranch}' please update it instead of trying to create a new one");
+                    await gitClient.PushFilesAsync(await GetScriptCommitsAsync(pullRequestBaseBranch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch);
+                    linkToPr = await gitClient.CreatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestTitle, pullRequestDescription);
+                    Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
                     return linkToPr;
                 }
             }
 
-            Console.WriteLine($"Failed to find or create a branch where Darc would commited the changes for the PR.");
+            Console.WriteLine($"PR with link '{existingPr}' is already opened in repo '{repoUri}' and branch '{pullRequestBaseBranch}' please update it instead of trying to create a new one");
             return linkToPr;
         }
 
@@ -155,28 +156,33 @@ ORDER BY DateProduced DESC";
             pullRequestBaseBranch = pullRequestBaseBranch ?? $"darc-{branch}";
 
             DependencyFileContentContainer fileContainer = await fileManager.UpdateDependencyFiles(itemsToUpdate, repoUri, branch);
-
-            if (await githubClient.PushFilesAsync(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch))
+            await gitClient.PushFilesAsync(fileContainer.GetFilesToCommitMap(pullRequestBaseBranch), repoUri, pullRequestBaseBranch);
+            
+            // If there is an arcade asset that we need to update we try to update the script files as well
+            DependencyItem arcadeItem = itemsToUpdate.Where(i => i.Name.Contains("arcade")).FirstOrDefault();
+            if (arcadeItem != null)
             {
-
-                // If there is an arcade asset that we need to update we try to update the script files as well
-                DependencyItem arcadeItem = itemsToUpdate.Where(i => i.Name.Contains("arcade")).FirstOrDefault();
-                if (arcadeItem != null &&
-                    await githubClient.PushFilesAsync(await GetScriptCommitsAsync(branch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch))
-                {
-                    linkToPr = await githubClient.UpdatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestId, pullRequestTitle, pullRequestDescription);
-                    Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
-                }
+                await gitClient.PushFilesAsync(await GetScriptCommitsAsync(branch, assetName: arcadeItem.Name), repoUri, pullRequestBaseBranch);
+                linkToPr = await gitClient.UpdatePullRequestAsync(repoUri, branch, pullRequestBaseBranch, pullRequestId, pullRequestTitle, pullRequestDescription);
+                Console.WriteLine($"Updating dependencies in repo '{repoUri}' and branch '{branch}' succeeded! PR link is: {linkToPr}");
             }
 
             return linkToPr;
         }
 
-        private async Task<Dictionary<string, GitHubCommit>> GetScriptCommitsAsync(string branch, string assetName = "arcade.sdk")
+        private void ValidateSettings(DarcSettings settings)
+        {
+            if (string.IsNullOrEmpty(settings.PersonalAccessToken))
+            {
+                throw new ArgumentException("When using remote actions a personal access token has to be set.");
+            }
+        }
+
+        private async Task<Dictionary<string, GitCommit>> GetScriptCommitsAsync(string branch, string assetName = "arcade.sdk")
         {
             Console.WriteLine($"Generating commits for script files");
             DependencyItem latestAsset = await GetLatestDependencyAsync(assetName);
-            Dictionary<string, GitHubCommit> commits = await githubClient.GetCommitsForPathAsync(latestAsset.RepoUri, latestAsset.Sha, branch);
+            Dictionary<string, GitCommit> commits = await gitClient.GetCommitsForPathAsync(latestAsset.RepoUri, latestAsset.Sha, branch);
             Console.WriteLine($"Generating commits for script files succeeded!");
             return commits;
         }

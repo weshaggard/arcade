@@ -1,7 +1,6 @@
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading.Tasks;
 using System.Xml;
 
@@ -9,7 +8,7 @@ namespace Microsoft.DotNet.Darc
 {
     public class DependencyFileManager
     {
-        private readonly GitHubClient gitHubClient;
+        private readonly IGitRepo gitClient;
         private const string VersionDetailsXmlPath = "eng/version.details.xml";
         private const string VersionPropsPath = "eng/Versions.props";
         private const string GlobalJsonPath = "global.json";
@@ -29,9 +28,9 @@ namespace Microsoft.DotNet.Darc
             }
         }
 
-        public DependencyFileManager(string accessToken)
+        public DependencyFileManager(IGitRepo gitRepo)
         {
-            gitHubClient = new GitHubClient(accessToken);
+            gitClient = gitRepo;
         }
 
         public async Task<XmlDocument> ReadVersionDetailsXmlAsync(string repoUri, string branch)
@@ -50,7 +49,7 @@ namespace Microsoft.DotNet.Darc
         {
             Console.WriteLine($"Reading '{GlobalJsonPath}' in repo '{repoUri}' and branch '{branch}'...");
 
-            string fileContent = await gitHubClient.GetFileContentsAsync(GlobalJsonPath, repoUri, branch);
+            string fileContent = await gitClient.GetFileContentsAsync(GlobalJsonPath, repoUri, branch);
             JObject jsonContent = JObject.Parse(fileContent);
             return jsonContent;
         }
@@ -176,7 +175,7 @@ namespace Microsoft.DotNet.Darc
         {
             Console.WriteLine($"Reading '{filePath}' in repo '{repoUri}' and branch '{branch}'...");
 
-            string fileContent = await gitHubClient.GetFileContentsAsync(filePath, repoUri, branch);
+            string fileContent = await gitClient.GetFileContentsAsync(filePath, repoUri, branch);
             XmlDocument document = new XmlDocument();
 
             try

@@ -5,12 +5,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace Microsoft.DotNet.Darc
 {
-    public class GitHubClient
+    public class GitHubClient : IGitRepo
     {
         private readonly string personalAccessToken;
         private const string GitHubApiUri = "https://api.github.com";
@@ -26,154 +25,102 @@ namespace Microsoft.DotNet.Darc
         public async Task<string> GetFileContentsAsync(string filePath, string repoUri, string branch)
         {
             Console.WriteLine($"Getting the contents of file '{filePath}' from repo '{repoUri}' in branch '{branch}'...");
-
-            using (HttpClient client = CreateHttpClient())
-            {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
-
-                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}contents/{filePath}?ref={branch}");
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Getting the contents of file '{filePath}' from repo '{repoUri}' in branch '{branch}' failed with code '{response.StatusCode}'");
-                    response.EnsureSuccessStatusCode();
-                }
-
-                Console.WriteLine($"Getting the contents of file '{filePath}' from repo '{repoUri}' in branch '{branch}' succeeded!");
-
-                return GetDecodedContent(await response.Content.ReadAsStringAsync());
-            }
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+            HttpResponseMessage response = await this.ExecuteGitCommand(HttpMethod.Get, $"repos/{ownerAndRepo}contents/{filePath}?ref={branch}");
+            Console.WriteLine($"Getting the contents of file '{filePath}' from repo '{repoUri}' in branch '{branch}' succeeded!");
+            dynamic responseContent = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+            string content = Convert.ToString(responseContent.content);
+            return this.GetDecodedContent(content);
         }
 
-        public async Task<bool> CreateDarcBranchAsync(string repoUri, string branch)
+        public async Task CreateDarcBranchAsync(string repoUri, string branch)
         {
             Console.WriteLine($"Verifying if '{DarcBranchName}-{branch}' branch exist in repo '{repoUri}'. If not, we'll create it...");
 
-            using (HttpClient client = CreateHttpClient())
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+            string latestSha = await GetLastCommitShaAsync(ownerAndRepo, branch);
+            string body;
+
+            GitHubRef githubRef = new GitHubRef($"refs/heads/{DarcBranchName}-{branch}", latestSha);
+            HttpResponseMessage response = null;
+
+            JsonSerializerSettings serializerSettings = new JsonSerializerSettings
             {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
+                ContractResolver = new CamelCasePropertyNamesContractResolver()
+            };
 
-                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}branches/{DarcBranchName}-{branch}");
-
-                string latestSha = await GetLastCommitShaAsync(ownerAndRepo, branch);
-                GitHubRef githubRef = new GitHubRef($"refs/heads/{DarcBranchName}-{branch}", latestSha);
-
-                JsonSerializerSettings serializerSettings = new JsonSerializerSettings
+            try
+            {
+                response = await this.ExecuteGitCommand(HttpMethod.Get, $"repos/{ownerAndRepo}branches/{DarcBranchName}-{branch}");
+            }
+            catch (HttpRequestException exc)
+            {
+                if (exc.Message.Contains(((int)HttpStatusCode.NotFound).ToString()))
                 {
-                    ContractResolver = new CamelCasePropertyNamesContractResolver()
-                };
+                    Console.WriteLine($"'{DarcBranchName}' branch doesn't exist. Creating it...");
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    if (response.StatusCode == HttpStatusCode.NotFound)
-                    {
-                        Console.WriteLine($"'{DarcBranchName}' branch doesn't exist. Creating it...");
+                    body = JsonConvert.SerializeObject(githubRef, serializerSettings);
 
-                        string body = JsonConvert.SerializeObject(githubRef, serializerSettings);
+                    response = await this.ExecuteGitCommand(HttpMethod.Post, $"repos/{ownerAndRepo}git/refs", body);
 
-                        response = await client.PostAsync($"repos/{ownerAndRepo}git/refs", new StringContent(body));
-
-                        if (!response.IsSuccessStatusCode)
-                        {
-                            Console.WriteLine($"Creating branch '{DarcBranchName}-{branch}' in repo '{repoUri}' from branch 'master' failed with status code '{response.StatusCode}'");
-                            response.EnsureSuccessStatusCode();
-                        }
-
-                        Console.WriteLine($"Branch '{DarcBranchName}-{branch}' created in repo '{repoUri}'!");
-                        return true;
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Checking if '{DarcBranchName}-{branch}' branch existed in repo '{repoUri}' failed with code '{response.StatusCode}'");
-                        response.EnsureSuccessStatusCode();
-                    }
+                    Console.WriteLine($"Branch '{DarcBranchName}-{branch}' created in repo '{repoUri}'!");
+                    return;
                 }
                 else
                 {
-                    Console.WriteLine($"Branch '{DarcBranchName}-{branch}' exists, making sure it is in sync with '{branch}'...");
-
-                    githubRef.Force = true;
-                    string body = JsonConvert.SerializeObject(githubRef, serializerSettings);
-
-                    HttpMethod method = new HttpMethod("PATCH");
-                    HttpRequestMessage message = new HttpRequestMessage(method, $"repos/{ownerAndRepo}git/{githubRef.Ref}")
-                    {
-                        Content = new StringContent(body)
-                    };
-
-                    response = await client.SendAsync(message);
-
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        Console.WriteLine($"Trying to pull the lastest changes from '{branch}' into '{DarcBranchName}-{branch}' failed with status code '{response.StatusCode}'"); ;
-                        response.EnsureSuccessStatusCode();
-                    }
+                    Console.WriteLine($"Checking if '{DarcBranchName}-{branch}' branch existed in repo '{repoUri}' failed with '{exc.Message}'");
+                    throw;
                 }
-
-                Console.WriteLine($"Branch '{DarcBranchName}-{branch}' now in sync with'{branch}'.");
-
-                return true;
             }
+
+            Console.WriteLine($"Branch '{DarcBranchName}-{branch}' exists, making sure it is in sync with '{branch}'...");
+
+            githubRef.Force = true;
+            body = JsonConvert.SerializeObject(githubRef, serializerSettings);
+            response = await this.ExecuteGitCommand(new HttpMethod("PATCH"), $"repos/{ownerAndRepo}git/{githubRef.Ref}", body);
+
+            Console.WriteLine($"Branch '{DarcBranchName}-{branch}' now in sync with'{branch}'.");
         }
 
-        public async Task<bool> PushFilesAsync(Dictionary<string, GitHubCommit> filesToCommit, string repoUri, string pullRequestBaseBranch)
+        public async Task PushFilesAsync(Dictionary<string, GitCommit> filesToCommit, string repoUri, string pullRequestBaseBranch)
         {
-            using (HttpClient client = CreateHttpClient())
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+
+            foreach (string filePath in filesToCommit.Keys)
             {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
+                GitCommit commit = filesToCommit[filePath] as GitCommit;
+                string blobSha = await CheckIfFileExistsAsync(repoUri, filePath, pullRequestBaseBranch);
 
-                foreach (string filePath in filesToCommit.Keys)
+                if (!string.IsNullOrEmpty(blobSha))
                 {
-                    GitHubCommit commit = filesToCommit[filePath];
-                    string blobSha = await CheckIfFileExistsAsync(repoUri, filePath, pullRequestBaseBranch);
-
-                    if (!string.IsNullOrEmpty(blobSha))
-                    {
-                        commit.Sha = blobSha;
-                    }
-
-                    JsonSerializerSettings serializerSettings = new JsonSerializerSettings
-                    {
-                        ContractResolver = new CamelCasePropertyNamesContractResolver(),
-                        NullValueHandling = NullValueHandling.Ignore
-                    };
-                    string body = JsonConvert.SerializeObject(commit, serializerSettings);
-                    HttpResponseMessage response = await client.PutAsync($"repos/{ownerAndRepo}contents/{filePath}", new StringContent(body));
-
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        Console.WriteLine($"There was an error while trying to update {filePath}");
-                        response.EnsureSuccessStatusCode();
-                    }
+                    commit.Sha = blobSha;
                 }
-            }
 
-            return true;
+                JsonSerializerSettings serializerSettings = new JsonSerializerSettings
+                {
+                    ContractResolver = new CamelCasePropertyNamesContractResolver(),
+                    NullValueHandling = NullValueHandling.Ignore
+                };
+                string body = JsonConvert.SerializeObject(commit, serializerSettings);
+
+                await this.ExecuteGitCommand(HttpMethod.Put, $"repos/{ownerAndRepo}contents/{filePath}", body);
+            }
         }
 
         public async Task<string> CheckForOpenedPullRequestsAsync(string repoUri, string darcBranch)
         {
             string pullRequestLink = null;
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+            string user = await GetUserNameAsync();
 
-            using (HttpClient client = CreateHttpClient())
+            HttpResponseMessage response = await this.ExecuteGitCommand(HttpMethod.Get, $"repos/{ownerAndRepo}pulls?head={user}:{darcBranch}");
+
+            List<dynamic> content = JsonConvert.DeserializeObject<List<dynamic>>(await response.Content.ReadAsStringAsync());
+            dynamic pr = content.Where(p => ((string)p.title).Contains("[Darc-Update]")).FirstOrDefault();
+
+            if (pr != null)
             {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
-                string user = await GetUserNameAsync();
-                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}pulls?head={user}:{darcBranch}");
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Looking for opened PRs by '{user}' in '{repoUri}' and branch '{darcBranch}' failed with code '{response.StatusCode}'");
-                    response.EnsureSuccessStatusCode();
-                }
-
-                List<dynamic> content = JsonConvert.DeserializeObject<List<dynamic>>(await response.Content.ReadAsStringAsync());
-                dynamic pr = content.Where(p => ((string)p.title).Contains("[Darc-Update]")).FirstOrDefault();
-
-                if (pr != null)
-                {
-                    pullRequestLink = pr.html_url;
-                }
+                pullRequestLink = pr.html_url;
             }
 
             return pullRequestLink;
@@ -183,38 +130,20 @@ namespace Microsoft.DotNet.Darc
         {
             string linkToPullRquest;
 
-            using (HttpClient client = CreateHttpClient())
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+            title = !string.IsNullOrEmpty(title) ? $"[Darc-Update] {title}" : VersionPullRequestTitle;
+            description = description ?? VersionPullRequestDescription;
+
+            GitHubPullRequest pullRequest = new GitHubPullRequest(title, description, sourceBranch, mergeWithBranch);
+            JsonSerializerSettings serializerSettings = new JsonSerializerSettings
             {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
+                ContractResolver = new CamelCasePropertyNamesContractResolver()
+            };
+            string body = JsonConvert.SerializeObject(pullRequest, serializerSettings);
+            HttpResponseMessage response = await this.ExecuteGitCommand(HttpMethod.Post, $"repos/{ownerAndRepo}pulls", body);
 
-                if (!string.IsNullOrEmpty(title))
-                {
-                    title = $"[Darc-Update] {title}";
-                }
-                else
-                {
-                    title = VersionPullRequestTitle;
-                }
-
-                description = description ?? VersionPullRequestDescription;
-
-                GitHubPullRequest pullRequest = new GitHubPullRequest(title, description, sourceBranch, mergeWithBranch);
-                JsonSerializerSettings serializerSettings = new JsonSerializerSettings
-                {
-                    ContractResolver = new CamelCasePropertyNamesContractResolver()
-                };
-                string body = JsonConvert.SerializeObject(pullRequest, serializerSettings);
-                HttpResponseMessage response = await client.PostAsync($"repos/{ownerAndRepo}pulls", new StringContent(body));
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"There was an error while trying to create a pull request in '{repoUri}' between branch '{mergeWithBranch}' and '{sourceBranch}'");
-                    response.EnsureSuccessStatusCode();
-                }
-
-                dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
-                linkToPullRquest = content.html_url;
-            }
+            dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+            linkToPullRquest = content.html_url;
 
             return linkToPullRquest;
         }
@@ -222,128 +151,76 @@ namespace Microsoft.DotNet.Darc
         public async Task<string> UpdatePullRequestAsync(string repoUri, string mergeWithBranch, string sourceBranch, int pullRequestId, string title = null, string description = null)
         {
             string linkToPullRquest;
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+            title = !string.IsNullOrEmpty(title) ? $"[Darc-Update] {title}" : VersionPullRequestTitle;
+            description = description ?? VersionPullRequestDescription;
 
-            using (HttpClient client = CreateHttpClient())
+            GitHubPullRequest pullRequest = new GitHubPullRequest(title, description, sourceBranch, mergeWithBranch);
+            JsonSerializerSettings serializerSettings = new JsonSerializerSettings
             {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
+                ContractResolver = new CamelCasePropertyNamesContractResolver()
+            };
 
-                if (!string.IsNullOrEmpty(title))
-                {
-                    title = $"[Darc-Update] {title}";
-                }
-                else
-                {
-                    title = VersionPullRequestTitle;
-                }
+            string body = JsonConvert.SerializeObject(pullRequest, serializerSettings);
 
-                description = description ?? VersionPullRequestDescription;
+            HttpResponseMessage response = await this.ExecuteGitCommand(new HttpMethod("PATCH"), $"repos/{ownerAndRepo}pulls/{pullRequestId}", body);
 
-                GitHubPullRequest pullRequest = new GitHubPullRequest(title, description, sourceBranch, mergeWithBranch);
-                JsonSerializerSettings serializerSettings = new JsonSerializerSettings
-                {
-                    ContractResolver = new CamelCasePropertyNamesContractResolver()
-                };
-
-                string body = JsonConvert.SerializeObject(pullRequest, serializerSettings);
-                HttpMethod method = new HttpMethod("PATCH");
-                HttpRequestMessage message = new HttpRequestMessage(method, $"repos/{ownerAndRepo}pulls/{pullRequestId}")
-                {
-                    Content = new StringContent(body)
-                };
-
-
-                HttpResponseMessage response = await client.SendAsync(message);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"There was an error while trying to create a pull request in '{repoUri}' between branch '{mergeWithBranch}' and '{sourceBranch}'");
-                    response.EnsureSuccessStatusCode();
-                }
-
-                dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
-                linkToPullRquest = content.html_url;
-            }
+            dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+            linkToPullRquest = content.html_url;
 
             return linkToPullRquest;
         }
 
-        public async Task<Dictionary<string, GitHubCommit>> GetCommitsForPathAsync(string repoUri, string sha, string branch, string path = "eng")
+        public async Task<Dictionary<string, GitCommit>> GetCommitsForPathAsync(string repoUri, string sha, string branch, string path = "eng")
         {
             Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}'");
-            Dictionary<string, GitHubCommit> commits = new Dictionary<string, GitHubCommit>();
+            Dictionary<string, GitCommit> commits = new Dictionary<string, GitCommit>();
             await GetCommitMapForPathAsync(repoUri, sha, branch, commits, path);
             return commits;
         }
 
-        private async Task GetCommitMapForPathAsync(string repoUri, string sha, string branch, Dictionary<string, GitHubCommit> commits, string path = "eng")
+        public async Task GetCommitMapForPathAsync(string repoUri, string sha, string branch, Dictionary<string, GitCommit> commits, string path = "eng")
         {
             Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}'");
 
-            using (HttpClient client = CreateHttpClient())
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+            HttpResponseMessage response = await this.ExecuteGitCommand(HttpMethod.Get, $"repos/{ownerAndRepo}contents/{path}?ref={sha}");
+
+            List<GitHubContent> contents = JsonConvert.DeserializeObject<List<GitHubContent>>(await response.Content.ReadAsStringAsync());
+
+            foreach (GitHubContent content in contents)
             {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
-                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}contents/{path}?ref={sha}");
-
-                if (!response.IsSuccessStatusCode)
+                if (content.Type == GitHubContentType.File)
                 {
-                    Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}' failed with code '{response.StatusCode}'");
-                    response.EnsureSuccessStatusCode();
+                    if (!DependencyFileManager.GetDependencyFiles.Contains(content.Path))
+                    {
+                        string fileContent = await GetFileContentAsync(ownerAndRepo, content.Path);
+                        GitCommit commit = new GitCommit($"Updating contents of file '{content.Path}'", fileContent, branch);
+                        commits.Add(content.Path, commit);
+                    }
                 }
-
-                List<GitHubContent> contents = JsonConvert.DeserializeObject<List<GitHubContent>>(await response.Content.ReadAsStringAsync());
-
-                foreach (GitHubContent content in contents)
+                else
                 {
-                    if (content.Type == GitHubContentType.File)
-                    {
-                        if (!DependencyFileManager.GetDependencyFiles.Contains(content.Path))
-                        {
-                            string fileContent = await GetFileContentAsync(ownerAndRepo, content.Path);
-                            GitHubCommit commit = new GitHubCommit($"Updating contents of file '{content.Path}'", fileContent, branch);
-                            commits.Add(content.Path, commit);
-                        }
-                    }
-                    else
-                    {
-                        await GetCommitMapForPathAsync(repoUri, sha, branch, commits, content.Path);
-                    }
+                    await GetCommitMapForPathAsync(repoUri, sha, branch, commits, content.Path);
                 }
             }
 
             Console.WriteLine($"Getting the contents of file/files in '{path}' of repo '{repoUri}' in sha '{sha}' succeeded!");
         }
 
-        //public Task UpdateScriptFilesAsync(string repoUri, string sha)
-        //{
-        //    using (HttpClient client = CreateHttpClient())
-        //    {
-        //        string ownerAndRepo = GetOwnerAndRepo(repoUri);
-
-        //    }
-        //}
-
-        private async Task<string> GetFileContentAsync(string ownerAndRepo, string path)
+        public async Task<string> GetFileContentAsync(string ownerAndRepo, string path)
         {
             string encodedContent;
 
-            using (HttpClient client = CreateHttpClient())
-            {
-                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}contents/{path}");
+            HttpResponseMessage response = await this.ExecuteGitCommand(HttpMethod.Get, $"repos/{ownerAndRepo}contents/{path}");
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Getting the contents of file '{path}' of failed with code '{response.StatusCode}'");
-                    response.EnsureSuccessStatusCode();
-                }
-
-                dynamic file = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
-                encodedContent = file.content;
-            }
+            dynamic file = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+            encodedContent = file.content;
 
             return encodedContent;
         }
 
-        private HttpClient CreateHttpClient()
+        public HttpClient CreateHttpClient(string versionOverride = null)
         {
             HttpClient client = new HttpClient
             {
@@ -355,28 +232,59 @@ namespace Microsoft.DotNet.Darc
             return client;
         }
 
-        private async Task<string> CheckIfFileExistsAsync(string repoUri, string filePath, string branch)
+        public async Task<string> CheckIfFileExistsAsync(string repoUri, string filePath, string branch)
         {
-            string sha = null;
+            string sha;
+            string ownerAndRepo = GetOwnerAndRepo(repoUri);
+            HttpResponseMessage response;
 
-            using (HttpClient client = CreateHttpClient())
+            try
             {
-                string ownerAndRepo = GetOwnerAndRepo(repoUri);
-                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}contents/{filePath}?ref={branch}");
-
-                if (!response.IsSuccessStatusCode)
+                response = await this.ExecuteGitCommand(HttpMethod.Get, $"repos/{ownerAndRepo}contents/{filePath}?ref={branch}");
+            }
+            catch (HttpRequestException exc)
+            {
+                if (exc.Message.Contains(((int)HttpStatusCode.NotFound).ToString()))
                 {
-                    if (response.StatusCode == HttpStatusCode.NotFound)
-                    {
-                        return sha;
-                    }
-
-                    response.EnsureSuccessStatusCode();
+                    return null;
                 }
 
-                dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
-                sha = content.sha;
+                throw exc;
             }
+
+            dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+            sha = content.sha;
+
+            return sha;
+        }
+
+        public async Task<string> GetLastCommitShaAsync(string ownerAndRepo, string branch)
+        {
+            HttpResponseMessage response = await this.ExecuteGitCommand(HttpMethod.Get, $"repos/{ownerAndRepo}commits/{branch}");
+
+            dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+
+            if (content == null)
+            {
+                throw new Exception($"No commits found in branch '{branch}' of '{ownerAndRepo}'");
+            }
+
+            return content.sha;
+        }
+
+        private async Task<string> GetUserNameAsync()
+        {
+            string sha;
+            HttpResponseMessage response = await this.ExecuteGitCommand(HttpMethod.Get, "user");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Getting authenticated user name failed with code '{response.StatusCode}'");
+                response.EnsureSuccessStatusCode();
+            }
+
+            dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
+            sha = content.login;
 
             return sha;
         }
@@ -386,61 +294,6 @@ namespace Microsoft.DotNet.Darc
             repoUri = repoUri.Replace("https://github.com/", string.Empty);
             repoUri = repoUri.Last() != '/' ? $"{repoUri}/" : repoUri;
             return repoUri;
-        }
-
-        private string GetDecodedContent(string encodedContent)
-        {
-            JsonSerializerSettings serializerSettings = new JsonSerializerSettings
-            {
-                ContractResolver = new CamelCasePropertyNamesContractResolver()
-            };
-
-            FileContent fileContent = JsonConvert.DeserializeObject<FileContent>(encodedContent, serializerSettings);
-
-            byte[] content = Convert.FromBase64String(fileContent.Content);
-            return Encoding.UTF8.GetString(content);
-        }
-
-        private async Task<string> GetLastCommitShaAsync(string ownerAndRepo, string branch)
-        {
-            string sha;
-
-            using (HttpClient client = CreateHttpClient())
-            {
-                HttpResponseMessage response = await client.GetAsync($"repos/{ownerAndRepo}commits/{branch}");
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Getting the last commit from '{ownerAndRepo}{branch}' failed with code '{response.StatusCode}'");
-                    response.EnsureSuccessStatusCode();
-                }
-
-                dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
-                sha = content.sha;
-            }
-
-            return sha;
-        }
-
-        private async Task<string> GetUserNameAsync()
-        {
-            string sha;
-
-            using (HttpClient client = CreateHttpClient())
-            {
-                HttpResponseMessage response = await client.GetAsync("user");
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Getting authenticated user name failed with code '{response.StatusCode}'");
-                    response.EnsureSuccessStatusCode();
-                }
-
-                dynamic content = JsonConvert.DeserializeObject<dynamic>(await response.Content.ReadAsStringAsync());
-                sha = content.login;
-            }
-
-            return sha;
         }
     }
 }
