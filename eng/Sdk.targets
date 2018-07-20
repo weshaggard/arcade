@@ -6,6 +6,7 @@
   <PropertyGroup>
     <PackageType>MSBuildSdk</PackageType>
     <IncludeBuildOutput>false</IncludeBuildOutput>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <IsPackable>true</IsPackable>
   </PropertyGroup>
 
